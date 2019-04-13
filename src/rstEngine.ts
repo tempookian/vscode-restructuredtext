@@ -5,14 +5,18 @@ import { Python } from "./python";
 import { Logger } from "./logger";
 import RstTransformerStatus from './features/utils/statusBar';
 import { Configuration } from './features/utils/configuration';
-import { exec } from 'child_process';
+import { exec, ChildProcess } from 'child_process';
 
 export class RSTEngine {
+  private readonly queue: ProcessQueue;
+
   public constructor(
     private readonly python: Python,
     private readonly logger: Logger,
     private readonly status: RstTransformerStatus,
-  ) { }
+  ) {
+    this.queue = new ProcessQueue(this.logger);
+  }
 
   private errorSnippet(error: string): string {
     return `<html><body>${error}</body></html>`;
@@ -89,8 +93,19 @@ export class RSTEngine {
     this.logger.appendLine('HTML file: ' + htmlPath);
 
     // Build and display file.
-    return new Promise<string>((resolve, reject) => {
-      exec(cmd, options, (error, stdout, stderr) => {
+    return new Promise<string>(async (resolve, reject) => {
+      this.logger.log("attempt to preview.")
+      if (this.queue.active) {
+        let id = this.queue.reserve();
+        this.queue.wait();
+        if (!this.queue.accept(id)) {
+          this.logger.log('another preview is in progress');
+          return 'Another preview is in progress.';
+        }
+      }
+
+      this.logger.log("can preview.");
+      this.queue.add(exec(cmd, options, (error, stdout, stderr) => {
         if (error) {
           const description =
             '<p>Cannot generate preview page.</p>\
@@ -152,7 +167,7 @@ export class RSTEngine {
             resolve(this.showError(description, errorMessage));
           }
         });
-      });
+      }));
     });
   }
 
@@ -220,5 +235,48 @@ export class RSTEngine {
     } catch (e) {
       return this.errorSnippet(e.toString());
     }
+  }
+}
+
+class ProcessQueue
+{
+  active: boolean = false;
+  currentProcess: ChildProcess | undefined;
+  reserved: string;
+   
+  public constructor(
+    private readonly logger: Logger,
+  ) {}
+
+  reserve(): string {
+    const uuidV1 = require('uuid/v1');
+    const id = uuidV1();
+    this.reserved = id;
+    return id;
+  }
+  
+  accept(id: string): boolean {
+    return this.reserved === id && !this.active;
+  }
+
+  async wait() {
+    const timeout = Configuration.getUpdateDelay();
+    await new Promise(done => setTimeout(done, timeout));
+  }
+
+  add(process: ChildProcess) {
+    this.currentProcess = process;
+    this.active = true;
+    this.logger.log('process started');
+    this.currentProcess.on('exit', ()=> {
+      this.logger.log('process exited.');
+      this.currentProcess = undefined;
+      this.active = false;
+    });
+    this.currentProcess.on('end', ()=> {
+      this.logger.log('process ended.');
+      this.currentProcess = undefined;
+      this.active = false;
+    });
   }
 }
