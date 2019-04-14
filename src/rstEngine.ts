@@ -95,13 +95,18 @@ export class RSTEngine {
     // Build and display file.
     return new Promise<string>(async (resolve, reject) => {
       this.logger.log("attempt to preview.")
-      if (this.queue.active) {
+      if (this.queue.isActive()) {
         let id = this.queue.reserve();
-        this.queue.wait();
-        if (!this.queue.accept(id)) {
-          this.logger.log('another preview is in progress');
-          return 'Another preview is in progress.';
-        }
+        this.logger.log('reserve ' + id);
+        do 
+        {
+          this.logger.log("a preview is in progress.");
+          this.queue.wait();
+          if (!this.queue.accept(id)) {
+            this.logger.log('a newer preview is scheduled. abort. ' + id);
+            return 'A newer preview is scheduled.';
+          }
+        } while (this.queue.isActive());
       }
 
       this.logger.log("can preview.");
@@ -240,7 +245,6 @@ export class RSTEngine {
 
 class ProcessQueue
 {
-  active: boolean = false;
   currentProcess: ChildProcess | undefined;
   reserved: string;
    
@@ -251,12 +255,12 @@ class ProcessQueue
   reserve(): string {
     const uuidV1 = require('uuid/v1');
     const id = uuidV1();
-    this.reserved = id;
+    this.reserved = id; // last reservation wins.
     return id;
   }
   
   accept(id: string): boolean {
-    return this.reserved === id && !this.active;
+    return this.reserved === id;
   }
 
   async wait() {
@@ -266,17 +270,46 @@ class ProcessQueue
 
   add(process: ChildProcess) {
     this.currentProcess = process;
-    this.active = true;
-    this.logger.log('process started');
+    this.logger.log('process started: ' + process.pid);
     this.currentProcess.on('exit', ()=> {
-      this.logger.log('process exited.');
+      this.logger.log('process exited: ' + process.pid);
       this.currentProcess = undefined;
-      this.active = false;
     });
     this.currentProcess.on('end', ()=> {
-      this.logger.log('process ended.');
+      this.logger.log('process ended: ' + process.pid);
       this.currentProcess = undefined;
-      this.active = false;
     });
+    this.currentProcess.on('close', ()=> {
+      this.logger.log('process closed: ' + process.pid);
+      this.currentProcess = undefined;
+    });
+    this.currentProcess.on('error', ()=> {
+      this.logger.log('process error: ' + process.pid);
+      this.currentProcess = undefined;
+    });
+  }
+
+  isActive(): boolean {
+    if (!this.currentProcess) {
+      return false;
+    }
+
+    const id = this.currentProcess.pid;
+    const result = this.isProcessRunning(this.currentProcess);
+    if (!result) {
+      this.currentProcess = undefined;
+    } else {
+      this.logger.log('process running: ' + id);
+    }
+
+    return result;
+  }
+
+  isProcessRunning(spawnedProcess: ChildProcess) {
+    return require('is-running')(spawnedProcess.pid) &&
+    //This is a hack because the isRunning module incorrectly
+    //detects non-running processes as running see this issue
+    //https://github.com/nisaacson/is-running/issues/4
+           spawnedProcess.stdout.readableLength !== 0;
   }
 }
